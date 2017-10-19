@@ -2,15 +2,16 @@
 """API for app that queries backend
 """
 
+import logging
+import json
+import MySQLdb
+
 # Insecure as fuck but w/e
 CNX = { 'user': 'abatisto_admin',
         'passwd': 'S7jse8irSP5NGvC2',
         'host': 'webdb.uvm.edu',
-        'db': 'ABATISTO_MusicianNetwork' }
-
-import logging
-import json
-import MySQLdb
+        'db': 'ABATISTO_MusicianNetwork',
+        'cursorclass': MySQLdb.cursors.DictCursor}
 
 class API(object):
     """Actual API"""
@@ -29,13 +30,13 @@ class API(object):
         self.env = environment
         self.resp = response
 
-        self.resp('200 OK', [('Content-Type', 'text/plain')])
+        self.resp('200 OK', [('Content-Type', 'application/json')])
 
         cur = self.db_conn.cursor()
         cur.execute('''
                     select * from profile
                     ''')
 
-        yield str(cur.fetchone())
+        yield json.dumps(cur.fetchone())
 
 request_handler = API()
