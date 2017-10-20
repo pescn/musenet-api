@@ -75,6 +75,7 @@ class API(object):
             self.logger.exception("")
             status = STATUS['error']
             result = 'An error has occured'
+
         finally:
             self.db_conn.commit()
             self.start_resp(status, _type)
