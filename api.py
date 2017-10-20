@@ -109,7 +109,7 @@ class API(object):
     def create_profile(self):
         """Create a new profile if all of the required parameters are in place and the email does not exist"""
         result = None
-        status = '400 Bad Request'
+        status = STATUS['bad']
         _type = 'text/plain'
 
         # Lists to verify required parameters are entered
