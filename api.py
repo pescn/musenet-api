@@ -112,7 +112,7 @@ class API(object):
         status = STATUS['bad']
         _type = 'text/plain'
 
-        # Lists to verify required parameters are entered
+        # Verify required parameters are entered
         if self.check_method('post') and self.check_body(PROFILE['required']):
             cur = self.db_conn.cursor()
 
