@@ -24,8 +24,9 @@ INSTRUCTIONS = ('Parameters invalid.\n'
                 '\tGET\n'
                 '\t\taction=get_profile&email=[email_of_profile]\n'
                 '\n\tPOST\n'
-                '\t\taction=create_profile - JSON with required '
-                'parameters %s and/or optional parameters %s' % (PROFILE['required'], PROFILE['optional']))
+                '\t\taction=create_profile\n'
+                '\t\tJSON with required parameters %s and/or optional parameters %s\n'
+                '\t\tGenerates a "profile_picture" field that is a reference to the directory on the API for a user\'s profile pictures') % (PROFILE['required'], PROFILE['optional'])
 
 STATUS = { 'ok':     '200 OK',
            'bad':    '400 Bad Request',
@@ -55,7 +56,7 @@ class API(object):
     def __call__(self, environment, response):
         """Set the environment variables and response function to self, then handle request"""
         result = None
-        status = '400 Bad Request'
+        status = STATUS['bad']
         _type = 'text/plain'
 
         try:
