@@ -78,7 +78,7 @@ class API(object):
             result = 'An error has occured'
 
         finally:
-            self.db_conn.commit()
+            self.db_conn.commit() if result else self.db_conn.rollback()
             self.start_resp(status, _type)
 
             result = INSTRUCTIONS if not result else result
@@ -131,8 +131,11 @@ class API(object):
                     if arg not in self.args:
                         self.args[arg] = None
 
+                # Create profile picture dir
                 self.args['profile_picture'] = '%s' % email.replace("@", "_").replace(".", "_")
                 os.mkdir('%s/www-root/api/pics/%s' % (self.root, self.args['profile_picture']))
+
+                # Insert new profile and get rowcount
                 cur.execute('''
                             insert into profile
                             values (%(email)s, %(name)s,
@@ -141,7 +144,29 @@ class API(object):
                                     %(phone)s, %(profile_picture)s)
                             ''', self.args)
 
-                if cur.rowcount:
+                success = bool(cur.rowcount)
+
+                genres = self.args.get('genre')
+                if genres:
+                    for genre in genres:
+                        cur.execute('''
+                                    insert into profile_genre (email, genre)
+                                    values (%s, %s)
+                                    ''', (self.args['email'], genre))
+
+                        success = success and bool(cur.rowcount)
+
+                instrs = self.args.get('instruments')
+                if instrs:
+                    for instr in instrs:
+                        cur.execute('''
+                                    insert into profile_instrument (email, instrument)
+                                    values (%s, %s)
+                                    ''', (self.args['email'], instr))
+
+                        success = success and bool(cur.rowcount)
+
+                if success:
                     result = "Success"
                     status = STATUS['ok']
 
