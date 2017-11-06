@@ -5,6 +5,7 @@
 import logging
 import os
 import json
+from hashlib import md5
 from urlparse import parse_qs
 import MySQLdb, MySQLdb.cursors
 
@@ -15,23 +16,35 @@ CNX = { 'user': 'abatisto_admin',
         'db': 'ABATISTO_MusicianNetwork',
         'cursorclass': MySQLdb.cursors.DictCursor }
 
-PROFILE = { 'required': ['email', 'password', 'role', 'location'],
-            'optional': ['genres', 'instruments', 'name', 'bio', 'phone'] }
-
-INSTRUCTIONS = ('Parameters invalid.\n'
-                'Please supply "?action=[your_action]" at the end of the url.\n\n'
-                'Options:\n'
-                '\tGET\n'
-                '\t\taction=get_profile&email=[email_of_profile]\n'
-                '\n\tPOST\n'
-                '\t\taction=create_profile\n'
-                '\t\tJSON with required parameters %s and/or optional parameters %s\n'
-                '\t\tGenerates a "profile_picture" field that is a reference to the directory on the API for a user\'s profile pictures') % (PROFILE['required'], PROFILE['optional'])
-
 STATUS = { 'ok':     '200 OK',
            'bad':    '400 Bad Request',
            'exists': '409 Conflict',
            'error':  '500 Internal Server Error' }
+
+ACTIONS = [ { 'name': 'get_profile',
+              'method': 'get',
+              'query_params': ['email'],
+              'args': {
+                  'required': [],
+                  'optional': []
+              },
+              'returns': 'application/json',
+            },
+
+            { 'name': 'create_profile',
+              'method': 'post',
+              'query_params': [],
+              'args': {
+                  'required': ['email', 'password', 'role', 'location'],
+                  'optional': ['genres', 'instruments', 'name', 'bio', 'phone']
+              },
+              'returns': 'text/plain',
+            }
+          ]
+
+INSTRUCTIONS = ('Parameters invalid.\n'
+                'Please supply "?action=[your_action]&parameters=[your_param]" at the end of the url.\n\n'
+                'Options:\n')
 
 class API(object):
     """Actual API"""
@@ -55,146 +68,52 @@ class API(object):
 
     def __call__(self, environment, response):
         """Set the environment variables and response function to self, then handle request"""
-        result = None
-        status = STATUS['bad']
-        _type = 'text/plain'
-
         try:
             self.env = environment.copy()
             self.resp = response
 
+            result = None
+            status = 'bad'
+            _type = 'text/plain'
+
             # Check the action and proceed if correct
             self.query = parse_qs(self.env['QUERY_STRING'])
-            action = str(self.query.get('action')[0] if self.query.get('action') else None)
+            action = self.parse_action()
 
-            # All actions will return None if they fail
-            if action and hasattr(self, action):
-                self.logger.info(action)
-                result, status, _type = getattr(self, action)()
+            if action:
+                result, status = getattr(self, action['name'])()
 
         except Exception:
-            self.logger.exception("")
-            status = STATUS['error']
-            result = 'An error has occured'
+            self.logger.exception('')
+            status = 'error'
 
         finally:
             self.db_conn.commit() if result else self.db_conn.rollback()
-            self.start_resp(status, _type)
 
-            result = INSTRUCTIONS if not result else result
+            if status == 'error':
+                result = STATUS[status]
+
+            elif status == 'bad':
+                result = INSTRUCTIONS
+
+                for action in ACTIONS:
+                    result += '\n%s' % self.format_dict(action)
+
+            elif result == 'ok':
+                _type = action['returns']
+
+            self.start_resp(STATUS[status], _type)
             yield result
 
-    def get_profile(self):
-        """Do a get on a profile"""
-        result = None
-        status = STATUS['bad']
-        _type = 'text/plain'
-
-        if self.check_method('get') and self.check_query('email'):
-            # Parse_qs implements as a list...
-            email = self.query['email'][0]
-
-            cur = self.db_conn.cursor()
-            cur.execute('''
-                        select *
-                        from profile
-                        where email = %s
-                        ''', (email,))
-
-            if cur.rowcount:
-                result = json.dumps(cur.fetchone())
-                _type = 'application/json'
-                status = STATUS['ok']
-
-        return result, status, _type
-
-    def create_profile(self):
-        """Create a new profile if all of the required parameters are in place and the email does not exist"""
-        result = None
-        status = STATUS['bad']
-        _type = 'text/plain'
-
-        # Verify required parameters are entered
-        if self.check_method('post') and self.check_body(PROFILE['required']):
-            cur = self.db_conn.cursor()
-
-            # See if it already exists
-            email = self.args['email']
-            cur.execute('''
-                        SELECT *
-                        FROM profile
-                        WHERE email=%s
-                        ''', (email,))
-
-            if not cur.rowcount:
-                for arg in PROFILE['required'] + PROFILE['optional']:
-                    if arg not in self.args:
-                        self.args[arg] = None
-
-                # Create profile picture dir
-                self.args['profile_picture'] = '%s' % email.replace("@", "_").replace(".", "_")
-                os.mkdir('%s/www-root/api/pics/%s' % (self.root, self.args['profile_picture']))
-
-                # Insert new profile and get rowcount
-                cur.execute('''
-                            insert into profile
-                            values (%(email)s, %(name)s,
-                                    %(password)s, %(role)s,
-                                    %(location)s, %(bio)s,
-                                    %(phone)s, %(profile_picture)s)
-                            ''', self.args)
-
-                success = bool(cur.rowcount)
-
-                genres = self.args.get('genre')
-                if genres:
-                    for genre in genres:
-                        cur.execute('''
-                                    insert into profile_genre (email, genre)
-                                    values (%s, %s)
-                                    ''', (self.args['email'], genre))
-
-                        success = success and bool(cur.rowcount)
-
-                instrs = self.args.get('instruments')
-                if instrs:
-                    for instr in instrs:
-                        cur.execute('''
-                                    insert into profile_instrument (email, instrument)
-                                    values (%s, %s)
-                                    ''', (self.args['email'], instr))
-
-                        success = success and bool(cur.rowcount)
-
-                if success:
-                    result = "Success"
-                    status = STATUS['ok']
-
+    def format_dict(self, _dict):
+        """Do stuff"""
+        _str = ''
+        for key, val in _dict.items():
+            if isinstance(val, dict):
+                _str += self.format_dict(val)
             else:
-                self.logger.error('Profile exists: %s', self.args)
-                result = 'Profile already exists'
-                status = STATUS['exists']
-
-            cur.close()
-
-        return result, status, _type
-
-    def check_query(self, param):
-        """Determine if a parameter exists in a query, otherwise bad request"""
-        return bool(self.query.get(param)[0]) if self.query.get(param) else None
-
-    def check_body(self, params):
-        """Determine if the params are within the data section of the request and set the arguments"""
-        msg_size = int(self.env.get('CONTENT_LENGTH', 0))
-
-        if msg_size:
-            self.args = json.loads(self.env['wsgi.input'].read(msg_size), object_hook=self.ascii_encode_dict)
-            success = all(param in self.args for param in params)
-        else:
-            self.args = None
-            success = False
-
-        return success
+                _str += '\t%s: %s\n' % (key, val)
+        return _str
 
     @staticmethod
     def ascii_encode_dict(data):
@@ -202,12 +121,129 @@ class API(object):
         ascii_encode = lambda x: x.encode('ascii')
         return dict(map(ascii_encode, pair) for pair in data.items())
 
-    def check_method(self, method):
-        """Input the method expected to validate it, otherwise bad request"""
-        return self.env['REQUEST_METHOD'] == method.upper()
-
     def start_resp(self, status, _type):
         """Easier way to start response"""
         self.resp(status, [('Content-Type', _type)])
+
+    def parse_action(self):
+        """Check arguments and methods from ACTIONS dictionary"""
+        name = str(self.query.get('action')[0] if self.query.get('action') else None)
+
+        method = self.env['REQUEST_METHOD']
+        url = self.env['PATH_INFO']
+
+        self.logger.info("%s: %s - Action: %s", url, method, name)
+
+        # First check if its actually a method
+        if hasattr(self, name):
+
+            # Now cycle through the ACTIONS dictionary and verify...
+            for action in ACTIONS:
+
+                # The name is correct and that the url query contains the correct parameters
+                if action['name'] == name and all(bool(self.query.get(param)) for param in action['query_params']):
+
+                    msg_size = int(self.env.get('CONTENT_LENGTH', 0))
+
+                    # The request actually needs arguments
+                    if msg_size and action['args']['required']:
+                        self.args = json.loads(self.env['wsgi.input'].read(msg_size), object_hook=self.ascii_encode_dict)
+
+                        # And the request contains the correct arguments
+                        if all(arg for arg in self.args in action['args']['required'] + action['args']['optional']) and \
+                            all(arg for arg in action['args']['required'] in self.args):
+
+                            # Then set all optional args that are not in there to None and return the action
+                            for arg in action['args']['optional']:
+                                if arg not in self.args:
+                                    self.args[arg] = None
+
+                            return action
+
+                    # The request doesn't need arguments
+                    if not msg_size and not action['args']['required']:
+                        return action
+
+        # If the check fails
+        return None
+
+    def get_profile(self):
+        """Do a get on a profile"""
+        email = self.query['email'][0]
+        self.logger.info("Params: %s", email)
+
+        cur = self.db_conn.cursor()
+        cur.execute('''
+                    select *
+                    from profile
+                    where email = %s
+                    ''', (email,))
+
+        if cur.rowcount:
+            result = json.dumps(cur.fetchone())
+            status = 'ok'
+
+        return result, status
+
+    def create_profile(self):
+        """Create a new profile if all of the required parameters are in place and the email does not exist"""
+        cur = self.db_conn.cursor()
+
+        # See if it already exists
+        email = self.args['email']
+        cur.execute('''
+                    select *
+                    from profile
+                    where email=%s
+                    ''', (email,))
+
+        if not cur.rowcount:
+            # Create profile picture dir
+            self.args['profile_picture'] = '%s' % email.replace("@", "_").replace(".", "_")
+            os.mkdir('%s/www-root/api/pics/%s' % (self.root, self.args['profile_picture']))
+
+            # Insert new profile and get rowcount
+            cur.execute('''
+                        insert into profile
+                        values (%(email)s, %(name)s,
+                                %(password)s, %(role)s,
+                                %(location)s, %(bio)s,
+                                %(phone)s, %(profile_picture)s)
+                        ''', self.args)
+
+            success = bool(cur.rowcount)
+
+            genres = self.args.get('genre')
+            if genres:
+                for genre in genres:
+                    cur.execute('''
+                                insert into profile_genre (email, genre)
+                                values (%s, %s)
+                                ''', (self.args['email'], genre))
+
+                    success = success and bool(cur.rowcount)
+
+            instrs = self.args.get('instruments')
+            if instrs:
+                for instr in instrs:
+                    cur.execute('''
+                                insert into profile_instrument (email, instrument)
+                                values (%s, %s)
+                                ''', (self.args['email'], instr))
+
+                    success = success and bool(cur.rowcount)
+
+            if success:
+                result = STATUS['ok']
+                status = 'ok'
+
+        else:
+            self.logger.error('Profile exists: %s', self.args)
+            result = 'Profile already exists'
+            status = 'exists'
+
+        cur.close()
+
+        return result, status
 
 request_handler = API()
