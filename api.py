@@ -18,12 +18,13 @@ CNX = { 'user': 'abatisto_admin',
 
 STATUS = { 'ok':     '200 OK',
            'bad':    '400 Bad Request',
+           'not':    '404 Not Found',
            'exists': '409 Conflict',
            'error':  '500 Internal Server Error' }
 
 ACTIONS = [ { 'name': 'get_profile',
               'method': 'get',
-              'query_params': ['email'],
+              'url_params': ['email'],
               'args': {
                   'required': [],
                   'optional': []
@@ -33,10 +34,20 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'create_profile',
               'method': 'post',
-              'query_params': [],
+              'url_params': [],
               'args': {
                   'required': ['email', 'password', 'role', 'location'],
                   'optional': ['genres', 'instruments', 'name', 'bio', 'phone']
+              },
+              'returns': 'text/plain',
+            },
+
+            { 'name': 'login',
+              'method': 'post',
+              'url_params': [],
+              'args': {
+                  'required': ['email', 'password'],
+                  'optional': []
               },
               'returns': 'text/plain',
             }
@@ -47,7 +58,7 @@ INSTRUCTIONS = ('Parameters invalid.\n'
                 'Options:\n')
 
 class API(object):
-    """Actual API"""
+    """Default all requests as bad, posts will return 200 OK by default when returning None"""
 
     def __init__(self):
         """Set some base things"""
@@ -88,19 +99,25 @@ class API(object):
             status = 'error'
 
         finally:
-            self.db_conn.commit() if result else self.db_conn.rollback()
+            self.db_conn.commit() if status == 'ok' else self.db_conn.rollback()
 
-            if status == 'error':
-                result = STATUS[status]
+            if status == 'bad':
+                self.logger.error('Invalid params')
 
-            elif status == 'bad':
                 result = INSTRUCTIONS
 
                 for action in ACTIONS:
                     result += '\n%s' % self.format_dict(action)
 
-            elif result == 'ok':
+            elif status == 'ok':
+                if not result:
+                    result = STATUS[status]
+
                 _type = action['returns']
+
+            else:
+                result = STATUS[status]
+                self.logger.error(result)
 
             self.start_resp(STATUS[status], _type)
             yield result
@@ -121,56 +138,65 @@ class API(object):
         ascii_encode = lambda x: x.encode('ascii')
         return dict(map(ascii_encode, pair) for pair in data.items())
 
+    @staticmethod
+    def _hash(msg):
+        """Quick hashing"""
+        _hash = md5()
+        _hash.update(msg)
+        return _hash.hexdigest()
+
     def start_resp(self, status, _type):
         """Easier way to start response"""
         self.resp(status, [('Content-Type', _type)])
 
     def parse_action(self):
         """Check arguments and methods from ACTIONS dictionary"""
+        result = None
+
         name = str(self.query.get('action')[0] if self.query.get('action') else None)
 
         method = self.env['REQUEST_METHOD']
-        url = self.env['PATH_INFO']
 
-        self.logger.info("%s: %s - Action: %s", url, method, name)
+        self.logger.info("%s - %s", method, name)
 
         # First check if its actually a method
         if hasattr(self, name):
 
-            # Now cycle through the ACTIONS dictionary and verify...
+            # Cycle through the ACTIONS dictionary
             for action in ACTIONS:
 
-                # The name is correct and that the url query contains the correct parameters
-                if action['name'] == name and all(bool(self.query.get(param)) for param in action['query_params']):
+                # Name is correct and the action is correct
+                if action['name'] == name and action['method'].lower() == method.lower():
 
+                    # Method needs arguments and actually has arguments
                     msg_size = int(self.env.get('CONTENT_LENGTH', 0))
 
-                    # The request actually needs arguments
-                    if msg_size and action['args']['required']:
+                    if action['args']['required'] and msg_size:
                         self.args = json.loads(self.env['wsgi.input'].read(msg_size), object_hook=self.ascii_encode_dict)
 
-                        # And the request contains the correct arguments
-                        if all(arg for arg in self.args in action['args']['required'] + action['args']['optional']) and \
-                            all(arg for arg in action['args']['required'] in self.args):
+                        # Request contains the correct arguments
+                        if all(arg in action['args']['required'] + action['args']['optional'] for arg in self.args) and \
+                            all(arg in self.args for arg in action['args']['required']):
 
-                            # Then set all optional args that are not in there to None and return the action
+                            # Then set all optional args that are not in request to None, action is correct
                             for arg in action['args']['optional']:
                                 if arg not in self.args:
                                     self.args[arg] = None
 
-                            return action
+                            self.logger.info(self.args)
+                            result = action
 
-                    # The request doesn't need arguments
-                    if not msg_size and not action['args']['required']:
-                        return action
+                    # Method needs url params
+                    elif action['url_params']:
+                        self.logger.info(self.query)
+                        result = action
 
         # If the check fails
-        return None
+        return result
 
     def get_profile(self):
         """Do a get on a profile"""
         email = self.query['email'][0]
-        self.logger.info("Params: %s", email)
 
         cur = self.db_conn.cursor()
         cur.execute('''
@@ -200,7 +226,12 @@ class API(object):
         if not cur.rowcount:
             # Create profile picture dir
             self.args['profile_picture'] = '%s' % email.replace("@", "_").replace(".", "_")
-            os.mkdir('%s/www-root/api/pics/%s' % (self.root, self.args['profile_picture']))
+
+            path = '%s/www-root/api/pics/%s' % (self.root, self.args['profile_picture'])
+            if not os.path.exists(path):
+                os.mkdir('%s/www-root/api/pics/%s' % (self.root, self.args['profile_picture']))
+
+            self.args['password'] = self._hash(self.args['password'])
 
             # Insert new profile and get rowcount
             cur.execute('''
@@ -234,16 +265,44 @@ class API(object):
                     success = success and bool(cur.rowcount)
 
             if success:
-                result = STATUS['ok']
                 status = 'ok'
 
         else:
             self.logger.error('Profile exists: %s', self.args)
-            result = 'Profile already exists'
             status = 'exists'
 
         cur.close()
 
-        return result, status
+        return None, status
+
+    def login(self):
+        """Verify posted information is correct"""
+        cur = self.db_conn.cursor()
+
+        cur.execute('''
+                    select 1
+                    from profile
+                    where email=%(email)s
+                    ''', self.args)
+
+        if not cur.rowcount:
+            self.logger.error('Profile does not exist')
+            status = 'not'
+
+        else:
+            self.args['password'] = self._hash(self.args['password'])
+
+            cur.execute('''
+                        select 1
+                        from profile
+                        where email=%(email)s and password=%(password)s
+                        ''', self.args)
+
+            if not cur.rowcount:
+                self.logger.error('Bad email/password combo')
+            else:
+                status = 'ok'
+
+        return None, status
 
 request_handler = API()
