@@ -103,6 +103,8 @@ class API(object):
 
             if status == 'bad':
                 self.logger.error('Invalid params')
+                self.logger.error('Args: %s', self.args)
+                self.logger.error('Url query: %s', self.query)
 
                 result = INSTRUCTIONS
 
@@ -131,12 +133,6 @@ class API(object):
             else:
                 _str += '\t%s: %s\n' % (key, val)
         return _str
-
-    @staticmethod
-    def ascii_encode_dict(data):
-        """Encode json in ascii"""
-        ascii_encode = lambda x: x.encode('ascii')
-        return dict(map(ascii_encode, pair) for pair in data.items())
 
     @staticmethod
     def _hash(msg):
@@ -172,7 +168,7 @@ class API(object):
                     msg_size = int(self.env.get('CONTENT_LENGTH', 0))
 
                     if action['args']['required'] and msg_size:
-                        self.args = json.loads(self.env['wsgi.input'].read(msg_size), object_hook=self.ascii_encode_dict)
+                        self.args = json.loads(self.env['wsgi.input'].read(msg_size))
 
                         # Request contains the correct arguments
                         if all(arg in action['args']['required'] + action['args']['optional'] for arg in self.args) and \
@@ -187,7 +183,7 @@ class API(object):
                             result = action
 
                     # Method needs url params
-                    elif action['url_params']:
+                    elif all(arg in action['url_params'] for arg in [param for param in self.query if param != "action"]):
                         self.logger.info(self.query)
                         result = action
 
@@ -200,16 +196,33 @@ class API(object):
 
         cur = self.db_conn.cursor()
         cur.execute('''
-                    select *
+                    select email, role, location, name, bio, phone
                     from profile
                     where email = %s
                     ''', (email,))
 
         if cur.rowcount:
-            result = json.dumps(cur.fetchone())
+            result = cur.fetchone()
+
+            cur.execute('''
+                        select instrument
+                        from profile_instrument
+                        where email = %s
+                        ''', (result['email'],))
+
+            result['instruments'] = [row['instrument'] for row in cur.fetchall()]
+
+            cur.execute('''
+                        select genre
+                        from profile_genre
+                        where email = %s
+                        ''', (result['email'],))
+
+            result['genres'] = [row['genre'] for row in cur.fetchall()]
+
             status = 'ok'
 
-        return result, status
+        return json.dumps(result), status
 
     def create_profile(self):
         """Create a new profile if all of the required parameters are in place and the email does not exist"""
@@ -244,7 +257,7 @@ class API(object):
 
             success = bool(cur.rowcount)
 
-            genres = self.args.get('genre')
+            genres = self.args.get('genres')
             if genres:
                 for genre in genres:
                     cur.execute('''
