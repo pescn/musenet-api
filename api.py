@@ -5,9 +5,12 @@
 import logging
 import os
 import json
-from hashlib import md5
+from random import randint
+from passlib.hash import pbkdf2_sha256
 from urlparse import parse_qs
 import MySQLdb, MySQLdb.cursors
+
+SALT_RANGE = {'min': 1, 'max': 2**16 - 1}
 
 # Insecure as fuck but system makes it impossible to do anything
 CNX = { 'user': 'abatisto_admin',
@@ -135,11 +138,12 @@ class API(object):
         return _str
 
     @staticmethod
-    def _hash(msg):
+    def _hash(msg, salt=None):
         """Quick hashing"""
-        _hash = md5()
-        _hash.update(msg)
-        return _hash.hexdigest()
+        if not salt:
+            salt = str(randint(SALT_RANGE['min'], SALT_RANGE['max'])).encode()
+        _hash = pbkdf2_sha256.using(salt=salt).hash(msg)
+        return _hash, salt
 
     def start_resp(self, status, _type):
         """Easier way to start response"""
@@ -244,15 +248,17 @@ class API(object):
             if not os.path.exists(path):
                 os.mkdir('%s/www-root/api/pics/%s' % (self.root, self.args['profile_picture']))
 
-            self.args['password'] = self._hash(self.args['password'])
+            self.args['password'], self.args['salt'] = self._hash(self.args['password'])
 
             # Insert new profile and get rowcount
             cur.execute('''
-                        insert into profile
+
+                        insert into profile (email, name, password, role, location, bio, phone, profile_picture, salt)
                         values (%(email)s, %(name)s,
                                 %(password)s, %(role)s,
                                 %(location)s, %(bio)s,
-                                %(phone)s, %(profile_picture)s)
+                                %(phone)s, %(profile_picture)s,
+                                %(salt)s)
                         ''', self.args)
 
             success = bool(cur.rowcount)
@@ -293,7 +299,7 @@ class API(object):
         cur = self.db_conn.cursor()
 
         cur.execute('''
-                    select 1
+                    select *
                     from profile
                     where email=%(email)s
                     ''', self.args)
@@ -303,12 +309,12 @@ class API(object):
             status = 'not'
 
         else:
-            self.args['password'] = self._hash(self.args['password'])
+            self.args['password'], self.args['salt'] = self._hash(self.args['password'], salt=cur.fetchone()['salt'])
 
             cur.execute('''
                         select 1
                         from profile
-                        where email=%(email)s and password=%(password)s
+                        where email=%(email)s and password=%(password)s and salt=%(salt)s
                         ''', self.args)
 
             if not cur.rowcount:
