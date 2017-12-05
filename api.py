@@ -69,7 +69,7 @@ ACTIONS = [ { 'name': 'get_profile',
               'method': 'post',
               'url_params': [],
               'args': {
-                  'required': ['group_id', 'name', 'profiles'],
+                  'required': ['name', 'profiles'],
                   'optional': ['genres', 'bio', 'location', 'email', 'type']
               },
               'returns': 'application/json',
@@ -97,9 +97,9 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'create_profile_ad',
               'method': 'post',
-              'url_params': [],
+              'url_params': ['email'],
               'args': {
-                  'required': ['email', 'looking_for'],
+                  'required': ['looking_for'],
                   'optional': ['genre', 'instrument', 'description']
               },
               'returns': 'application/json',
@@ -107,9 +107,9 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'create_group_ad',
               'method': 'post',
-              'url_params': [],
+              'url_params': ['group_id'],
               'args': {
-                  'required': ['group_id', 'looking_for'],
+                  'required': ['looking_for'],
                   'optional': ['genre', 'instrument', 'description']
               },
               'returns': 'application/json',
@@ -140,6 +140,26 @@ ACTIONS = [ { 'name': 'get_profile',
               'url_params': ['group_id'],
               'args': {
                   'required': ['base64'],
+                  'optional': []
+              },
+              'returns': 'application/json',
+            },
+
+            { 'name': 'get_profile_picture',
+              'method': 'get',
+              'url_params': ['email'],
+              'args': {
+                  'required': [],
+                  'optional': []
+              },
+              'returns': 'application/json',
+            },
+
+            { 'name': 'get_group_pictures',
+              'method': 'get',
+              'url_params': ['group_id'],
+              'args': {
+                  'required': [],
                   'optional': []
               },
               'returns': 'application/json',
@@ -237,11 +257,10 @@ class API(object):
         return _hash, salt
 
     @staticmethod
-    def query_str(insert=False, **kwargs):
+    def query_str(insert=False, entity='', **kwargs):
         """Generate a DB query string"""
         if not insert:
-            return ['{0}=%({0})s'.format(name) for name in kwargs]
-
+            return ['{0}.{1}=%({0})s'.format(entity, name) for name in kwargs] if entity else ['{0}=%({0})s'.format(name) for name in kwargs]
         else:
             # Need to populate two lists together due to the fact that dictionary order in python
             # is not guaranteed to be the same each time
@@ -261,9 +280,9 @@ class API(object):
         query = self.query_str(**kwargs)
         cur.execute('''
                     select *
-                    from %s
-                    where %s
-                    ''' % (where, ' and '.join(query)), kwargs)
+                    from {0}
+                    where {1}
+                    '''.format(where, ' and '.join(query)), kwargs)
 
         count = cur.rowcount
 
@@ -298,25 +317,19 @@ class API(object):
                     # Check arguments
                     msg_size = int(self.env.get('CONTENT_LENGTH', 0))
 
-                    has_picture = 'picture' in action['name']
-
-                    if has_picture:
-                        self.args = self.env['wsgi.input'].read(msg_size)
-                    elif action['args']['required'] or action['args']['optional']:
+                    if action['args']['required'] or action['args']['optional']:
                         self.args = json.loads(self.env['wsgi.input'].read(msg_size))
 
-                    needs_args = action['args']['required'] or action['args']['optional']
-                    needs_query = action['url_params']
+                    needs_args = bool(action['args']['required'])
+                    needs_query = bool(action['url_params'])
                     no_bad_arguments = all(arg in action['args']['required'] + action['args']['optional'] and val for arg, val in self.args.items()) if self.args else False
                     has_required_arguments = all(arg in self.args for arg in action['args']['required']) if self.args else False
                     has_required_query = all(arg in self.query for arg in action['url_params']) if self.query else False
 
-                    okay = (not needs_query or not needs_args)
+                    okay = (not needs_query and not needs_args)
                     okay = okay or (msg_size and no_bad_arguments and has_required_arguments and has_required_query)
                     okay = okay or (msg_size and no_bad_arguments and has_required_arguments)
-                    okay = okay or (has_required_query and not has_picture)
-                    okay = okay or (msg_size and has_required_query and has_picture)
-
+                    okay = okay or (needs_query and has_required_query)
                     result = action if okay else None
 
         # If the check fails
@@ -368,8 +381,8 @@ class API(object):
         status = 'bad'
 
         email = self.args['email']
-        genres = self.args.pop('genres')
-        instrs = self.args.pop('instruments')
+        genres = self.args.pop('genres', None)
+        instrs = self.args.pop('instruments', None)
 
         if not self.exists(where='profiles', email=email) and (not genres or isinstance(genres, list)) and (not instrs or isinstance(instrs, list)):
 
@@ -424,8 +437,8 @@ class API(object):
         status = 'bad'
 
         email = self.query['email'][0]
-        genres = self.args.pop('genres')
-        instrs = self.args.pop('instruments')
+        genres = self.args.pop('genres', None)
+        instrs = self.args.pop('instruments', None)
 
         if not self.exists(where='profiles', email=email):
             self.logger.error('Profile does not exist')
@@ -508,8 +521,8 @@ class API(object):
         result = None
         status = 'bad'
 
-        profiles = self.args.pop('profiles')
-        genres = self.args.pop('genres')
+        profiles = self.args.pop('profiles', None)
+        genres = self.args.pop('genres', None)
 
         cur = self.db_conn.cursor()
 
@@ -617,7 +630,7 @@ class API(object):
         status = 'bad'
 
         group_id = self.query['group_id'][0]
-        genres = self.args.pop('genres')
+        genres = self.args.pop('genres', None)
 
         if self.exists(where='groups', group_id=group_id) and (not genres or isinstance(genres, list)):
             query_str = self.query_str(self.args)
@@ -661,9 +674,9 @@ class API(object):
         status = 'bad'
         result = None
 
-        if self.exists(where='profiles', email=self.args['email']) and not self.exists(where='profile_ad', **self.args):
-            email = self.args.pop('email')
+        email = self.query.pop('email')[0]
 
+        if self.exists(where='profiles', email=email) and not self.exists(where='ads', **self.args):
             query_str, args = self.query_str(insert=True, **self.args)
 
             cur = self.db_conn.cursor()
@@ -700,9 +713,9 @@ class API(object):
         status = 'bad'
         result = None
 
-        if self.exists(where='groups', group_id=self.args['group_id']) and not self.exists(where='group_ad', **self.args):
-            group_id = self.args.pop('group_id')
+        group_id = self.query.pop('group_id')[0]
 
+        if self.exists(where='groups', group_id=group_id) and not self.exists(where='ads', **self.args):
             query_str, args = self.query_str(insert=True, **self.args)
 
             cur = self.db_conn.cursor()
@@ -832,6 +845,46 @@ class API(object):
 
         else:
             status = 'not'
+
+        return json.dumps(result), status
+
+    def get_profile_picture(self):
+        """Retrieve a profile picture with email"""
+        status = 'bad'
+        result = None
+
+        email = self.query.pop('email')[0]
+
+        if self.exists(where='profiles', email=email):
+            cur = self.db_conn.cursor()
+
+            cur.execute('''
+                        select p.base64, pp.main
+                        from pictures p
+                        left join profile_picture pp
+                        on pp.picture_id = p.picture_id
+                        where pp.email = %s
+                        ''', (email,))
+
+        return json.dumps(result), status
+
+    def get_group_picture(self):
+        """Retrieve a group picture with group_id"""
+        status = 'bad'
+        result = None
+
+        group_id = self.query.pop('group_id')[0]
+
+        if self.exists(where='groups', group_id=group_id):
+            cur = self.db_conn.cursor()
+
+            cur.execute('''
+                        select p.base64, gp.main
+                        from pictures p
+                        left join group_picture gp
+                        on gp.picture_id = p.picture_id
+                        where gp.group_id = %s
+                        ''', (group_id,))
 
         return json.dumps(result), status
 
