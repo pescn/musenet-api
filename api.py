@@ -276,7 +276,6 @@ class API(object):
         """See if something exists in db"""
         cur = self.db_conn.cursor()
 
-        # See if it already exists
         query = self.query_str(**kwargs)
         cur.execute('''
                     select *
@@ -284,17 +283,24 @@ class API(object):
                     where {1}
                     '''.format(where, ' and '.join(query)), kwargs)
 
-        count = cur.rowcount
-
-        if count and where == 'profiles':
-            self.args['salt'] = cur.fetchone()['salt']
-
         cur.close()
-        return count
+        return bool(cur.rowcount)
 
     def start_resp(self, status, _type):
         """Easier way to start response"""
         self.resp(status, [('Content-Type', _type)])
+
+    def get_salt(self, email):
+        """Get salt"""
+        cur = self.db_conn.cursor()
+
+        cur.execute('''
+                    select salt
+                    from profiles
+                    where email = %s
+                    ''', (email,))
+
+        return cur.fetchone()['salt']
 
     def parse_action(self):
         """Check arguments and methods from ACTIONS dictionary"""
@@ -495,12 +501,14 @@ class API(object):
         """Verify posted information is correct"""
         status = 'bad'
 
-        if not self.exists(where='profiles', email=self.args['email']):
+        email = self.args['email']
+
+        if not self.exists(where='profiles', email=email):
             self.logger.error('Profile does not exist')
             status = 'not'
 
         else:
-            self.args['password'], self.args['salt'] = self._hash(self.args['password'], salt=self.args['salt'])
+            self.args['password'], self.args['salt'] = self._hash(self.args['password'], salt=self.get_salt(email))
 
             cur = self.db_conn.cursor()
             cur.execute('''
