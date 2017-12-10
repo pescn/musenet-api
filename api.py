@@ -5,10 +5,16 @@
 import logging
 import os
 import json
+from datetime import datetime
 from random import randint
+from math import radians, cos, sin, asin, sqrt
 from urlparse import parse_qs
 from passlib.hash import pbkdf2_sha256
 import MySQLdb, MySQLdb.cursors
+
+AD_DAYS_LIMIT = 30
+EARTH_RADIUS_KM = 6371
+KM_TO_M = 0.62137119
 
 SALT_RANGE = {'min': 1, 'max': 2**16 - 1}
 
@@ -27,7 +33,10 @@ STATUS = { 'ok':     '200 OK',
 
 ACTIONS = [ { 'name': 'get_profile',
               'method': 'get',
-              'url_params': ['email'],
+              'url_params': {
+                  'required': [],
+                  'optional': ['email'],
+              },
               'args': {
                   'required': [],
                   'optional': []
@@ -37,7 +46,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'create_profile',
               'method': 'post',
-              'url_params': [],
+              'url_params': {
+                  'required': [],
+                  'optional': [],
+              },
               'args': {
                   'required': ['email', 'password', 'role', 'location'],
                   'optional': ['genres', 'instruments', 'name', 'bio', 'phone']
@@ -47,7 +59,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'edit_profile',
               'method': 'post',
-              'url_params': ['email'],
+              'url_params': {
+                  'required': ['email'],
+                  'optional': [],
+              },
               'args': {
                   'required': [],
                   'optional': ['genres', 'instruments', 'name', 'bio', 'phone', 'role', 'location']
@@ -57,7 +72,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'get_group',
               'method': 'get',
-              'url_params': ['group_id'],
+              'url_params': {
+                  'required': [],
+                  'optional': ['profile_email', 'group_id'],
+              },
               'args': {
                   'required': [],
                   'optional': []
@@ -67,7 +85,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'create_group',
               'method': 'post',
-              'url_params': [],
+              'url_params': {
+                  'required': [],
+                  'optional': [],
+              },
               'args': {
                   'required': ['name', 'profiles'],
                   'optional': ['genres', 'bio', 'location', 'email', 'type']
@@ -77,7 +98,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'edit_group',
               'method': 'post',
-              'url_params': ['group_id'],
+              'url_params': {
+                  'required': ['group_id'],
+                  'optional': [],
+              },
               'args': {
                   'required': [],
                   'optional': ['name', 'genres', 'bio', 'location', 'email', 'type']
@@ -87,7 +111,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'login',
               'method': 'post',
-              'url_params': [],
+              'url_params': {
+                  'required': [],
+                  'optional': [],
+              },
               'args': {
                   'required': ['email', 'password'],
                   'optional': []
@@ -97,7 +124,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'create_profile_ad',
               'method': 'post',
-              'url_params': ['email'],
+              'url_params': {
+                  'required': ['email'],
+                  'optional': [],
+              },
               'args': {
                   'required': ['looking_for'],
                   'optional': ['genre', 'instrument', 'description']
@@ -107,7 +137,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'create_group_ad',
               'method': 'post',
-              'url_params': ['group_id'],
+              'url_params': {
+                  'required': ['group_id'],
+                  'optional': [],
+              },
               'args': {
                   'required': ['looking_for'],
                   'optional': ['genre', 'instrument', 'description']
@@ -117,17 +150,24 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'get_ads',
               'method': 'get',
-              'url_params': [],
+              'url_params': {
+                  'required': [],
+                  'optional': ['email', 'group_id', 'genre', 'instrument', 'role', 'keywords', 'location', 'date_range', ''],
+              },
               'args': {
                   'required': [],
                   'optional': []
               },
               'returns': 'application/json',
+              'note': 'May use either email or group_id, but not both.'
             },
 
             { 'name': 'add_profile_picture',
               'method': 'post',
-              'url_params': ['email'],
+              'url_params': {
+                  'required': ['email'],
+                  'optional': ['main'],
+              },
               'args': {
                   'required': ['base64'],
                   'optional': []
@@ -137,7 +177,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'add_group_picture',
               'method': 'post',
-              'url_params': ['group_id'],
+              'url_params': {
+                  'required': ['group_id'],
+                  'optional': ['main'],
+              },
               'args': {
                   'required': ['base64'],
                   'optional': []
@@ -147,7 +190,10 @@ ACTIONS = [ { 'name': 'get_profile',
 
             { 'name': 'get_profile_picture',
               'method': 'get',
-              'url_params': ['email'],
+              'url_params': {
+                  'required': ['email'],
+                  'optional': [],
+              },
               'args': {
                   'required': [],
                   'optional': []
@@ -155,9 +201,12 @@ ACTIONS = [ { 'name': 'get_profile',
               'returns': 'application/json',
             },
 
-            { 'name': 'get_group_pictures',
+            { 'name': 'get_group_picture',
               'method': 'get',
-              'url_params': ['group_id'],
+              'url_params': {
+                  'required': ['group_id'],
+                  'optional': [],
+              },
               'args': {
                   'required': [],
                   'optional': []
@@ -176,13 +225,15 @@ class API(object):
     def __init__(self):
         """Set some base things"""
         self.root = os.path.expanduser('~')
-        handler = logging.FileHandler('%s/www-logs/api.log' % self.root)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
 
-        self.logger = logging.getLogger(os.path.basename(__file__.rstrip('.')))
+        self.logger = logging.getLogger(os.path.basename(__file__.split('.')[0]))
         self.logger.setLevel(logging.INFO)
-        self.logger.addHandler(handler)
+
+        if not self.logger.handlers:
+            handler = logging.FileHandler('%s/www-logs/api.log' % self.root)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
 
         self.env = None
         self.resp = None
@@ -193,13 +244,13 @@ class API(object):
 
     def __call__(self, environment, response):
         """Set the environment variables and response function to self, then handle request"""
+        result = None
+        status = 'bad'
+        _type = 'text/plain'
+
         try:
             self.env = environment.copy()
             self.resp = response
-
-            result = None
-            status = 'bad'
-            _type = 'text/plain'
 
             # Check the action and proceed if correct
             self.query = parse_qs(self.env['QUERY_STRING'])
@@ -207,13 +258,6 @@ class API(object):
 
             if action:
                 result, status = getattr(self, action['name'])()
-
-        except Exception:
-            self.logger.exception('')
-            status = 'error'
-
-        finally:
-            self.db_conn.commit() if status == 'ok' else self.db_conn.rollback()
 
             if status == 'bad':
                 self.logger.error('Invalid params')
@@ -228,12 +272,22 @@ class API(object):
             elif status == 'ok':
                 if not result:
                     result = STATUS[status]
+                else:
+                    result = json.dumps(result)
 
                 _type = action['returns']
 
             else:
                 result = STATUS[status]
                 self.logger.error(result)
+
+        except Exception:
+            result = STATUS['error']
+            self.logger.error(result)
+            self.logger.exception('')
+
+        finally:
+            self.db_conn.commit() if status == 'ok' else self.db_conn.rollback()
 
             self.start_resp(STATUS[status], _type)
             yield result
@@ -243,6 +297,7 @@ class API(object):
         _str = ''
         for key, val in _dict.items():
             if isinstance(val, dict):
+                _str += '\t%s\n' % (key)
                 _str += self.format_dict(val)
             else:
                 _str += '\t%s: %s\n' % (key, val)
@@ -300,7 +355,7 @@ class API(object):
                     where email = %s
                     ''', (email,))
 
-        return cur.fetchone()['salt']
+        return cur.fetchall()[0]['salt']
 
     def parse_action(self):
         """Check arguments and methods from ACTIONS dictionary"""
@@ -327,59 +382,96 @@ class API(object):
                         self.args = json.loads(self.env['wsgi.input'].read(msg_size))
 
                     needs_args = bool(action['args']['required'])
-                    needs_query = bool(action['url_params'])
-                    no_bad_arguments = all(arg in action['args']['required'] + action['args']['optional'] and val for arg, val in self.args.items()) if self.args else False
-                    has_required_arguments = all(arg in self.args for arg in action['args']['required']) if self.args else False
-                    has_required_query = all(arg in self.query for arg in action['url_params']) if self.query else False
+                    args = action['args']['required'] + action['args']['optional']
+                    no_bad_args = all(arg in args and val for arg, val in self.args.items()) if self.args else True
+                    has_required_args = needs_args and all(arg in self.args for arg in action['args']['required']) if self.args else False
 
-                    okay = (not needs_query and not needs_args)
-                    okay = okay or (msg_size and no_bad_arguments and has_required_arguments and has_required_query)
-                    okay = okay or (msg_size and no_bad_arguments and has_required_arguments)
-                    okay = okay or (needs_query and has_required_query)
-                    result = action if okay else None
+                    needs_query = bool(action['url_params']['required'])
+                    params = action['url_params']['required'] + action['url_params']['optional']
+                    no_bad_query = all(arg in params and val for arg, val in self.query.items()) if self.query else True
+                    has_required_query = needs_query and all(arg in self.query for arg in action['url_params']['required']) if self.query else False
+
+                    args_okay = no_bad_args and ((needs_args and has_required_args) or not needs_args)
+                    query_okay = no_bad_query and ((needs_query and has_required_query) or not needs_query)
+
+                    result = action if args_okay and query_okay else None
 
         # If the check fails
         return result
+
+    @staticmethod
+    def haversine(lon1, lat1, lon2, lat2):
+        """Calculate the great circle distance between two points on the earth (specified in decimal degrees)
+        https://stackoverflow.com/questions/15736995/how-can-i-quickly-estimate-the-distance-between-two-latitude-longitude-points"""
+
+        # convert decimal degrees to radians
+        lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+
+        # haversine formula
+        dlon = lon2 - lon1
+        dlat = lat2 - lat1
+        const = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        circle = 2 * asin(sqrt(const))
+
+        # Radius of earth in kilometers is 6371
+        kilometers = EARTH_RADIUS_KM * circle
+
+        # Convert km to m
+        miles = kilometers * KM_TO_M
+
+        return miles
 
     def get_profile(self):
         """Do a get on a profile"""
         result = None
         status = 'bad'
 
-        email = self.query['email'][0]
+        email = self.query.get('email')
 
         cur = self.db_conn.cursor()
-        cur.execute('''
-                    select email, role, location, name, bio, phone
-                    from profiles
-                    where email = %s
-                    ''', (email,))
+
+        if email:
+            email = email[0]
+
+            cur.execute('''
+                        select email, role, location, name, bio, phone
+                        from profiles
+                        where email = %s
+                        ''', (email,))
+        else:
+            cur.execute('''
+                        select email, role, location, name, bio, phone
+                        from profiles
+                        ''')
 
         if cur.rowcount:
-            result = cur.fetchone()
+            results = cur.fetchall()
 
-            cur.execute('''
-                        select instrument
-                        from profile_instrument
-                        where email = %s
-                        ''', (email,))
+            for result in results:
+                cur.execute('''
+                            select instrument
+                            from profile_instrument
+                            where email = %s
+                            ''', (result['email'],))
 
-            result['instruments'] = [row['instrument'] for row in cur.fetchall()]
+                result['instruments'] = [row['instrument'] for row in cur.fetchall()]
 
-            cur.execute('''
-                        select genre
-                        from profile_genre
-                        where email = %s
-                        ''', (email,))
+                cur.execute('''
+                            select genre
+                            from profile_genre
+                            where email = %s
+                            ''', (result['email'],))
 
-            result['genres'] = [row['genre'] for row in cur.fetchall()]
+                result['genres'] = [row['genre'] for row in cur.fetchall()]
 
             status = 'ok'
+
+            result = results[0] if len(results) == 1 else results
 
         else:
             status = 'not'
 
-        return json.dumps(result), status
+        return result, status
 
     def create_profile(self):
         """Create a new profile if all of the required parameters are in place and the email does not exist"""
@@ -436,7 +528,7 @@ class API(object):
             self.logger.error('Profile exists: %s', self.args)
             status = 'exists'
 
-        return json.dumps(result), status
+        return result, status
 
     def edit_profile(self):
         """Edit profile fields"""
@@ -553,15 +645,16 @@ class API(object):
             cur = self.db_conn.cursor()
             cur.execute('''
                         insert into groups ({0})
-                        values ({1});
-
-                        select LAST_INSERT_ID();
+                        values ({1})
                         '''.format(args, query_str), self.args)
 
             success = bool(cur.rowcount)
 
             if success:
-                group_id = cur.fetchone()
+                cur.execute('''
+                            select LAST_INSERT_ID() as id
+                            ''')
+                group_id = cur.fetchall()[0]['id']
 
                 for email in profiles:
                     cur.execute('''
@@ -591,47 +684,80 @@ class API(object):
         elif same_name_same_profile:
             status = 'exists'
 
-        return json.dumps(result), status
+        return result, status
 
     def get_group(self):
         """Get a group"""
         result = None
         status = 'bad'
 
-        group_id = self.query['group_id'][0]
+        group_id = self.query.get('group_id')
+        email = self.query.get('profile_email')
 
         cur = self.db_conn.cursor()
-        cur.execute('''
-                    select *
-                    from groups
-                    where group_id = %s
-                    ''', (group_id,))
+
+        if group_id:
+            group_id = group_id[0]
+
+            cur.execute('''
+                        select *
+                        from groups
+                        where group_id = %s
+                        ''', (group_id,))
+        elif email:
+            email = email[0]
+
+            cur.execute('''
+                        select g.*
+                        from group_profile p
+                        inner join groups g
+                        on p.email = %s and g.group_id = p.group_id
+                        ''', (email,))
+
+        elif email and group_id:
+            email = email[0]
+            group_id = group_id[0]
+
+            cur.execute('''
+                        select g.*
+                        from group_profile p
+                        inner join groups g
+                        on p.email = %s and p.group_id = %s and g.group_id = p.group_id
+                        ''', (email, group_id))
+        else:
+            cur.execute('''
+                        select *
+                        from groups
+                        ''')
 
         if cur.rowcount:
-            result = cur.fetchone()
+            groups = cur.fetchall()
 
-            cur.execute('''
-                        select *
-                        from group_profile
-                        where group_id = %s
-                        ''', (group_id,))
+            for result in groups:
+                cur.execute('''
+                            select *
+                            from group_profile
+                            where group_id = %s
+                            ''', (result['group_id'],))
 
-            result['emails'] = [row['email'] for row in cur.fetchall()]
+                result['emails'] = [row['email'] for row in cur.fetchall()]
 
-            cur.execute('''
-                        select *
-                        from group_genre
-                        where group_id = %s
-                        ''', (group_id,))
+                cur.execute('''
+                            select *
+                            from group_genre
+                            where group_id = %s
+                            ''', (result['group_id'],))
 
-            result['genres'] = [row['genre'] for row in cur.fetchall()]
+                result['genres'] = [row['genre'] for row in cur.fetchall()]
 
             status = 'ok'
+
+            result = groups[0] if len(groups) == 1 else groups
 
         else:
             status = 'not'
 
-        return json.dumps(result), status
+        return result, status
 
     def edit_group(self):
         """Edit a group"""
@@ -690,15 +816,16 @@ class API(object):
             cur = self.db_conn.cursor()
             cur.execute('''
                         insert into ads ({0})
-                        values ({1});
-
-                        select LAST_INSERT_ID();
+                        values ({1})
                         '''.format(', '.join(args), ', '.join(query_str)), self.args)
 
             success = bool(cur.rowcount)
 
             if success:
-                ad_id = cur.fetchone()
+                cur.execute('''
+                            select LAST_INSERT_ID() as id
+                            ''')
+                ad_id = cur.fetchall()[0]['id']
 
                 cur.execute('''
                             insert into profile_ad (email, ad_id)
@@ -729,15 +856,16 @@ class API(object):
             cur = self.db_conn.cursor()
             cur.execute('''
                         insert into ads ({0})
-                        values ({1});
-
-                        select LAST_INSERT_ID();
+                        values ({1})
                         '''.format(', '.join(args), ', '.join(query_str)), self.args)
 
             success = bool(cur.rowcount)
 
             if success:
-                ad_id = cur.fetchone()
+                cur.execute('''
+                            select LAST_INSERT_ID() as id
+                            ''')
+                ad_id = cur.fetchall()[0]['id']
 
                 cur.execute('''
                             insert into group_ad (group_id, ad_id)
@@ -757,26 +885,118 @@ class API(object):
 
         return result, status
 
+    def rank_ads(self, other_ads, entity_ads, entity):
+        """Compare ads against a given entity and its associated ads in order to rank them for the best match"""
+        ads = []
+        self.logger.info(entity)
+        for other_ad in other_ads:
+            rank = 0
+
+            entity_criteria = {'instrument': 'instruments', 'genre': 'genres'}
+            ad_criteria = {'genre': 'genre', 'instrument': 'instrument'}
+
+            # Don't include the ad if it's not looking for the entity
+            if other_ad.get('looking_for', 'a') == entity.get('role', entity.get('type', 'b')):
+                continue
+
+            if 'type' in entity:
+                del entity_criteria['instrument']
+
+            # Calculate attribute rank
+            criteria = [other_ad[key] in entity[val] for key, val in entity_criteria.items() if other_ad[key] in entity[val]]
+            rank += len(criteria)
+
+            # Calculate own ads attribute rank
+            for entity_ad in entity_ads:
+                if entity_ad['looking_for'] == other_ad['looking_for']:
+                    criteria = [other_ad[key] == entity_ad[val] for key, val in ad_criteria.items() if other_ad[key] == entity_ad[val]]
+                    rank += len(criteria) * 2
+
+            # TODO: change all profiles and groups to include x and y coords in db
+            # # Calculate distance rank by miles
+            # if entity['location'] and other_ad['location']:
+            #     (ent_x, ent_y) = entity['location'].split(':')
+            #     (other_x, other_y) = other_ad['location'].split(':')
+            #     distance = self.haversine(float(ent_x), float(ent_y), float(other_x), float(other_y))
+            #     other_ad['distance'] = distance
+            #     rank += distance
+            # else:
+            #     other_ad['distance'] = None
+
+            # Calculate date rank by dividing thirty days by the number of days since the ad was created,
+            # thus putting low number of days at a higher rank
+            days = int(AD_DAYS_LIMIT / (datetime.today() - other_ad['created']).days)
+            rank += days
+
+            other_ad['rank'] = rank
+            ads.append(other_ad)
+
+        return ads
+
     def get_ads(self):
         """Get ads"""
+        result = []
 
-        # TODO: create a ranking system for ads and return in highest ranking order
+        email = self.query.get('email')[0] if self.query.get('email') else None
+        group_id = self.query.get('group_id')[0] if self.query.get('group_id') else None
+
+        if email and group_id:
+            return None, 'bad'
+
+        group_ids = []
+        if email:
+            self.query['profile_email'] = email
+            groups = self.get_group()[0]
+            group_ids = [group['group_id'] for group in groups] if groups else []
+
+        group_ids.append(group_id)
+        query_str = ['pa.email != %s'] + ['ga.group_id != %s'] * len(group_ids)
+        query_str = ' or '.join(query_str)
+
+        # Select all ads not associated with own groups or profile
         cur = self.db_conn.cursor()
-
         cur.execute('''
-                    select a.description, a.looking_for, a.genre, a.instrument, a.created, p.email, g.group_id
+                    select a.*, ga.group_id, pa.email
                     from ads a
-                    left join profile_ad p
-                    on p.ad_id = a.ad_id
-                    left join group_ad g
-                    on g.ad_id = a.ad_id
-                    ''')
+                    left join group_ad ga
+                    on a.ad_id = ga.ad_id
+                    left join profile_ad pa
+                    on a.ad_id = pa.ad_id
+                    where {0}
+                    '''.format(query_str), (email,) + tuple(group_ids))
 
-        ads = cur.fetchall()
-        for _ad in ads:
+        ### PROFILE MATCH ###
+        if email:
+            profile = self.get_profile()[0]
+
+            # Select ads associate with profile
+            profile_ads = [ad for ad in cur if ad['email'] == profile['email']]
+
+            # Select all ads that are looking for the profile's ad criteria or profile's attributes
+            results = self.rank_ads(cur, profile_ads, profile)
+            result = sorted(results, key=lambda k: k['rank'], reverse=True)
+
+        ### GROUP MATCH ###
+        elif group_id:
+            group = self.get_group()[0]
+
+            # Selet ads associated with group
+            group_ads = [ad for ad in cur if ad['group_id'] == group['group_id']]
+
+            # Select all ads that are looking for a group's ad criteria or group's attributes
+            results = self.rank_ads(cur, group_ads, group)
+            result = sorted(results, key=lambda k: k['rank'], reverse=True)
+
+        else:
+            result = cur.fetchall()
+
+        for _ad in result:
+            _ad['updated'] = _ad['updated'].strftime('%m-%d-%Y %H:%M:%S')
             _ad['created'] = _ad['created'].strftime('%m-%d-%Y %H:%M:%S')
 
-        return json.dumps(ads), 'ok'
+        cur.close()
+
+        return result, 'ok'
 
     def add_profile_picture(self):
         """Upload a profile picture with associated metadata"""
@@ -791,20 +1011,24 @@ class API(object):
             query_str, args = self.query_str(insert=True, **self.args)
             cur.execute('''
                         insert into pictures ({0})
-                        values({1});
-
-                        return LAST INSERT_ID();
+                        values({1})
                         '''.format(', '.join(args), ', '.join(query_str)), self.args)
 
             success = bool(cur.rowcount)
 
             if success:
-                picture_id = cur.fetchone()
+                cur.execute('''
+                            select LAST_INSERT_ID() as id
+                            ''')
+                picture_id = cur.fetchall()[0]['id']
+
+                if not self.args.get('main', None):
+                    self.args['main'] = False
 
                 cur.execute('''
-                            insert into profile_picture (email, picture_id)
-                            values (%s, %s)
-                            ''', (email, picture_id))
+                            insert into profile_picture (email, picture_id, main)
+                            values (%s, %s, %s)
+                            ''', (email, picture_id, self.args['main']))
 
             success = success and bool(cur.rowcount)
 
@@ -815,7 +1039,7 @@ class API(object):
         else:
             status = 'not'
 
-        return json.dumps(result), status
+        return result, status
 
     def add_group_picture(self):
         """Upload a group picture with associated metadata"""
@@ -830,20 +1054,25 @@ class API(object):
             query_str, args = self.query_str(insert=True, **self.args)
             cur.execute('''
                         insert into pictures ({0})
-                        values({1});
-
-                        return LAST INSERT_ID();
+                        values({1})
                         '''.format(', '.join(args), ', '.join(query_str)), self.args)
 
             success = bool(cur.rowcount)
 
             if success:
-                picture_id = cur.fetchone()
+                cur.execute('''
+                            select LAST_INSERT_ID() as id
+                            ''')
+                picture_id = cur.fetchall()[0]['id']
+
+
+                if not self.args.get('main', None):
+                    self.args['main'] = False
 
                 cur.execute('''
-                            insert into group_picture (group_id, picture_id)
-                            values (%s, %s)
-                            ''', (group_id, picture_id))
+                            insert into group_picture (group_id, picture_id, main)
+                            values (%s, %s, %s)
+                            ''', (group_id, picture_id, self.args['main']))
 
             success = success and bool(cur.rowcount)
 
@@ -854,14 +1083,14 @@ class API(object):
         else:
             status = 'not'
 
-        return json.dumps(result), status
+        return result, status
 
     def get_profile_picture(self):
         """Retrieve a profile picture with email"""
         status = 'bad'
         result = None
 
-        email = self.query.pop('email')[0]
+        email = self.query['email'][0]
 
         if self.exists(where='profiles', email=email):
             cur = self.db_conn.cursor()
@@ -869,12 +1098,20 @@ class API(object):
             cur.execute('''
                         select p.base64, pp.main
                         from pictures p
-                        left join profile_picture pp
+                        inner join profile_picture pp
                         on pp.picture_id = p.picture_id
                         where pp.email = %s
                         ''', (email,))
 
-        return json.dumps(result), status
+            if cur.rowcount:
+                self.logger.info("HERE")
+                result = cur.fetchall()
+                status = 'ok'
+
+        else:
+            status = 'not'
+
+        return result, status
 
     def get_group_picture(self):
         """Retrieve a group picture with group_id"""
@@ -889,11 +1126,18 @@ class API(object):
             cur.execute('''
                         select p.base64, gp.main
                         from pictures p
-                        left join group_picture gp
+                        inner join group_picture gp
                         on gp.picture_id = p.picture_id
                         where gp.group_id = %s
                         ''', (group_id,))
 
-        return json.dumps(result), status
+            if cur.rowcount:
+                result = cur.fetchall()
+                status = 'ok'
+
+        else:
+            status = 'not'
+
+        return result, status
 
 request_handler = API() # pylint: disable=C0103
