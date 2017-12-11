@@ -355,7 +355,9 @@ class API(object):
                     where email = %s
                     ''', (email,))
 
+
         return cur.fetchall()[0]['salt']
+
 
     def parse_action(self):
         """Check arguments and methods from ACTIONS dictionary"""
