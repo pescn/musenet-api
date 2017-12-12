@@ -5,6 +5,7 @@
 import logging
 import os
 import json
+import zlib
 from datetime import datetime
 from random import randint
 from math import radians, cos, sin, asin, sqrt
@@ -12,9 +13,10 @@ from urlparse import parse_qs
 from passlib.hash import pbkdf2_sha256
 import MySQLdb, MySQLdb.cursors
 
-AD_DAYS_LIMIT = 30
 EARTH_RADIUS_KM = 6371
 KM_TO_M = 0.62137119
+
+AD_DAYS_LIMIT = 30
 
 SALT_RANGE = {'min': 1, 'max': 2**16 - 1}
 
@@ -152,7 +154,20 @@ ACTIONS = [ { 'name': 'get_profile',
               'method': 'get',
               'url_params': {
                   'required': [],
-                  'optional': ['email', 'group_id', 'genre', 'instrument', 'role', 'keywords', 'location', 'date_range', ''],
+                  'optional': ['email', 'group_id'],
+              },
+              'args': {
+                  'required': [],
+                  'optional': []
+              },
+              'returns': 'application/json',
+            },
+
+            { 'name': 'match_ads',
+              'method': 'get',
+              'url_params': {
+                  'required': [],
+                  'optional': ['email', 'group_id', 'genre', 'instrument', 'role', 'keywords', 'location', 'date_range'],
               },
               'args': {
                   'required': [],
@@ -162,15 +177,28 @@ ACTIONS = [ { 'name': 'get_profile',
               'note': 'May use either email or group_id, but not both.'
             },
 
+            { 'name': 'edit_ad',
+              'method': 'post',
+              'url_params': {
+                  'required': ['ad_id'],
+                  'optional': [],
+              },
+              'args': {
+                  'required': [],
+                  'optional': ['looking_for', 'genre', 'instrument', 'description']
+              },
+              'returns': 'application/json'
+            },
+
             { 'name': 'add_profile_picture',
               'method': 'post',
               'url_params': {
                   'required': ['email'],
-                  'optional': ['main'],
+                  'optional': [],
               },
               'args': {
                   'required': ['base64'],
-                  'optional': []
+                  'optional': ['main']
               },
               'returns': 'application/json',
             },
@@ -179,11 +207,11 @@ ACTIONS = [ { 'name': 'get_profile',
               'method': 'post',
               'url_params': {
                   'required': ['group_id'],
-                  'optional': ['main'],
+                  'optional': [],
               },
               'args': {
                   'required': ['base64'],
-                  'optional': []
+                  'optional': ['main']
               },
               'returns': 'application/json',
             },
@@ -205,6 +233,19 @@ ACTIONS = [ { 'name': 'get_profile',
               'method': 'get',
               'url_params': {
                   'required': ['group_id'],
+                  'optional': [],
+              },
+              'args': {
+                  'required': [],
+                  'optional': []
+              },
+              'returns': 'application/json',
+            },
+
+            { 'name': 'search_profile',
+              'method': 'get',
+              'url_params': {
+                  'required': ['phrase'],
                   'optional': [],
               },
               'args': {
@@ -261,7 +302,8 @@ class API(object):
 
             if status == 'bad':
                 self.logger.error('Invalid params')
-                self.logger.error('Args: %s', self.args)
+                if self.args:
+                    self.logger.error(['{0}: {1}'.format(arg, val) for arg, val in self.args.items() if arg != 'base64'])
                 self.logger.error('Url query: %s', self.query)
 
                 result = INSTRUCTIONS
@@ -385,13 +427,13 @@ class API(object):
 
                     needs_args = bool(action['args']['required'])
                     args = action['args']['required'] + action['args']['optional']
-                    no_bad_args = all(arg in args and val for arg, val in self.args.items()) if self.args else True
-                    has_required_args = needs_args and all(arg in self.args for arg in action['args']['required']) if self.args else False
+                    no_bad_args = all(arg in args for arg in self.args) if self.args else True
+                    has_required_args = all(arg in self.args for arg in action['args']['required']) if self.args else False
 
                     needs_query = bool(action['url_params']['required'])
                     params = action['url_params']['required'] + action['url_params']['optional']
-                    no_bad_query = all(arg in params and val for arg, val in self.query.items()) if self.query else True
-                    has_required_query = needs_query and all(arg in self.query for arg in action['url_params']['required']) if self.query else False
+                    no_bad_query = all(arg in params for arg in self.query) if self.query else True
+                    has_required_query = all(arg in self.query for arg in action['url_params']['required']) if self.query else False
 
                     args_okay = no_bad_args and ((needs_args and has_required_args) or not needs_args)
                     query_okay = no_bad_query and ((needs_query and has_required_query) or not needs_query)
@@ -887,10 +929,34 @@ class API(object):
 
         return result, status
 
+    def edit_ad(self):
+        """Edit an ad"""
+        status = 'bad'
+
+        ad_id = self.query.pop('ad_id')[0]
+
+        if self.exists(where='ads', ad_id=ad_id):
+            query_str = self.query_str(**self.args)
+
+            self.args['ad_id'] = ad_id
+
+            cur = self.db_conn.cursor()
+            cur.execute('''
+                        update ads a
+                        set {0}
+                        where ad_id=%(ad_id)s
+                        '''.format(', '.join(query_str)), self.args)
+
+            status = 'ok'
+
+        else:
+            status = 'not'
+
+        return None, status
+
     def rank_ads(self, other_ads, entity_ads, entity):
         """Compare ads against a given entity and its associated ads in order to rank them for the best match"""
         ads = []
-        self.logger.info(entity)
         for other_ad in other_ads:
             rank = 0
 
@@ -914,21 +980,21 @@ class API(object):
                     criteria = [other_ad[key] == entity_ad[val] for key, val in ad_criteria.items() if other_ad[key] == entity_ad[val]]
                     rank += len(criteria) * 2
 
-            # TODO: change all profiles and groups to include x and y coords in db
             # # Calculate distance rank by miles
-            # if entity['location'] and other_ad['location']:
-            #     (ent_x, ent_y) = entity['location'].split(':')
-            #     (other_x, other_y) = other_ad['location'].split(':')
-            #     distance = self.haversine(float(ent_x), float(ent_y), float(other_x), float(other_y))
-            #     other_ad['distance'] = distance
-            #     rank += distance
-            # else:
-            #     other_ad['distance'] = None
+            if entity['location'] and other_ad['location']:
+                (ent_x, ent_y) = entity['location'].split(':')
+                (other_x, other_y) = other_ad['location'].split(':')
+                distance = self.haversine(float(ent_x), float(ent_y), float(other_x), float(other_y))
+                other_ad['distance'] = distance
+                rank += distance
+            else:
+                other_ad['distance'] = None
 
             # Calculate date rank by dividing thirty days by the number of days since the ad was created,
             # thus putting low number of days at a higher rank
-            days = int(AD_DAYS_LIMIT / (datetime.today() - other_ad['created']).days)
-            rank += days
+            days_since = ((datetime.today() - other_ad['created']).days) + 1
+            day_rank = int(AD_DAYS_LIMIT / days_since)
+            rank += day_rank
 
             other_ad['rank'] = rank
             ads.append(other_ad)
@@ -937,12 +1003,60 @@ class API(object):
 
     def get_ads(self):
         """Get ads"""
+        result = None
+
+        email = self.query.get('email')[0] if self.query.get('email') else None
+        group_id = self.query.get('group_id')[0] if self.query.get('group_id') else None
+
+        cur = self.db_conn.cursor()
+
+        group_ids = []
+        if email and group_id:
+            self.query['profile_email'] = email
+            groups = self.get_group()[0]
+            group_ids = [group['group_id'] for group in groups] if groups else []
+
+        if group_id:
+            group_ids.append(group_id)
+
+        query_str = ['pa.email = %s'] if email else []
+        query_str = query_str + ['ga.group_id = %s'] * len(group_ids)
+        query_str = 'where ' + ' or '.join(query_str) if query_str else ''
+        args = (email,) + tuple(group_ids) if query_str else None
+
+        # Select all ads associated with group or profile
+        cur = self.db_conn.cursor()
+        cur.execute('''
+                    select a.*, ga.group_id, pa.email
+                    from ads a
+                    left join group_ad ga
+                    on a.ad_id = ga.ad_id
+                    left join profile_ad pa
+                    on a.ad_id = pa.ad_id
+                    {0}
+                    '''.format(query_str), args)
+
+        if cur.rowcount:
+            status = 'ok'
+            result = cur.fetchall()
+
+            for _ad in result:
+                _ad['updated'] = _ad['updated'].strftime('%m-%d-%Y %H:%M:%S')
+                _ad['created'] = _ad['created'].strftime('%m-%d-%Y %H:%M:%S')
+
+        else:
+            status = 'not'
+
+        return result, status
+
+    def match_ads(self):
+        """Match ads"""
         result = []
 
         email = self.query.get('email')[0] if self.query.get('email') else None
         group_id = self.query.get('group_id')[0] if self.query.get('group_id') else None
 
-        if email and group_id:
+        if (email and group_id) or (not email and not group_id):
             return None, 'bad'
 
         group_ids = []
@@ -951,9 +1065,13 @@ class API(object):
             groups = self.get_group()[0]
             group_ids = [group['group_id'] for group in groups] if groups else []
 
-        group_ids.append(group_id)
-        query_str = ['pa.email != %s'] + ['ga.group_id != %s'] * len(group_ids)
-        query_str = ' or '.join(query_str)
+        if group_id:
+            group_ids.append(group_id)
+
+        query_str = ['pa.email != %s'] if email else []
+        query_str = query_str + ['ga.group_id != %s'] * len(group_ids)
+        query_str = 'where ' + ' or '.join(query_str) if query_str else ''
+        args = (email,) + tuple(group_ids) if query_str else None
 
         # Select all ads not associated with own groups or profile
         cur = self.db_conn.cursor()
@@ -964,8 +1082,8 @@ class API(object):
                     on a.ad_id = ga.ad_id
                     left join profile_ad pa
                     on a.ad_id = pa.ad_id
-                    where {0}
-                    '''.format(query_str), (email,) + tuple(group_ids))
+                    {0}
+                    '''.format(query_str), args)
 
         ### PROFILE MATCH ###
         if email:
@@ -989,9 +1107,6 @@ class API(object):
             results = self.rank_ads(cur, group_ads, group)
             result = sorted(results, key=lambda k: k['rank'], reverse=True)
 
-        else:
-            result = cur.fetchall()
-
         for _ad in result:
             _ad['updated'] = _ad['updated'].strftime('%m-%d-%Y %H:%M:%S')
             _ad['created'] = _ad['created'].strftime('%m-%d-%Y %H:%M:%S')
@@ -1008,7 +1123,11 @@ class API(object):
         email = self.query['email'][0]
 
         if self.exists(where='profiles', email=email):
+
             cur = self.db_conn.cursor()
+
+            self.args['base64'] = zlib.compress(self.args['base64'])
+            main = self.args.pop('main', False)
 
             query_str, args = self.query_str(insert=True, **self.args)
             cur.execute('''
@@ -1024,13 +1143,10 @@ class API(object):
                             ''')
                 picture_id = cur.fetchall()[0]['id']
 
-                if not self.args.get('main', None):
-                    self.args['main'] = False
-
                 cur.execute('''
                             insert into profile_picture (email, picture_id, main)
                             values (%s, %s, %s)
-                            ''', (email, picture_id, self.args['main']))
+                            ''', (email, picture_id, main))
 
             success = success and bool(cur.rowcount)
 
@@ -1053,6 +1169,9 @@ class API(object):
         if self.exists(where='groups', group_id=group_id):
             cur = self.db_conn.cursor()
 
+            self.args['base64'] = zlib.compress(self.args['base64'])
+            main = self.args.pop('main', False)
+
             query_str, args = self.query_str(insert=True, **self.args)
             cur.execute('''
                         insert into pictures ({0})
@@ -1067,14 +1186,10 @@ class API(object):
                             ''')
                 picture_id = cur.fetchall()[0]['id']
 
-
-                if not self.args.get('main', None):
-                    self.args['main'] = False
-
                 cur.execute('''
                             insert into group_picture (group_id, picture_id, main)
                             values (%s, %s, %s)
-                            ''', (group_id, picture_id, self.args['main']))
+                            ''', (group_id, picture_id, main))
 
             success = success and bool(cur.rowcount)
 
@@ -1106,8 +1221,13 @@ class API(object):
                         ''', (email,))
 
             if cur.rowcount:
-                self.logger.info("HERE")
-                result = cur.fetchall()
+                results = cur.fetchall()
+
+                for result in results:
+                    result['base64'] = zlib.decompress(result['base64'])
+
+                result = results
+
                 status = 'ok'
 
         else:
@@ -1134,12 +1254,28 @@ class API(object):
                         ''', (group_id,))
 
             if cur.rowcount:
-                result = cur.fetchall()
+                results = cur.fetchall()
+
+                for result in results:
+                    result['base64'] = zlib.decompress(result['base64'])
+
+                result = results
                 status = 'ok'
 
         else:
             status = 'not'
 
         return result, status
+
+    def search_profile(self):
+        """Get on profile with name or email similar to phrase string"""
+        phrase = '%' + self.query['phrase'][0] + '%'
+        cur = self.db_conn.cursor()
+        cur.execute('''
+                    select email, name, bio, role, location
+                    from profiles
+                    where email like %s or name like %s
+                    ''', (phrase, phrase))
+        return cur.fetchall(), 'ok'
 
 request_handler = API() # pylint: disable=C0103
