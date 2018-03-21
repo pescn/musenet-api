@@ -20,13 +20,6 @@ AD_DAYS_LIMIT = 30
 
 SALT_RANGE = {'min': 1, 'max': 2**16 - 1}
 
-# Insecure as fuck but system makes it impossible to do anything
-CNX = { 'user': 'abatisto_admin',
-        'passwd': 'S7jse8irSP5NGvC2',
-        'host': 'webdb.uvm.edu',
-        'db': 'ABATISTO_MusicianNetwork',
-        'cursorclass': MySQLdb.cursors.DictCursor }
-
 STATUS = { 'ok':     '200 OK',
            'bad':    '400 Bad Request',
            'not':    '404 Not Found',
